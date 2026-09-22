@@ -8,3 +8,8 @@ It also authenticates using the `Authorization` header so the API token is not i
 If your Streamlit error page showed the full `api_token=...` URL, treat that token as compromised. Delete/revoke that token in MySportmonks, create a new token, and update the Streamlit Secret `SPORTMONKS_TOKEN`.
 
 Do not paste the token into chat, GitHub, screenshots, or source files.
+
+
+## Fix in this build
+
+The Sportmonks v3 `scores` payload stores home/away in `score.participant`. The previous parser looked for a different field, which could make valid completed fixtures appear to have no scores. This build reads `score.participant` and fits the prediction model only on matches before the prediction date to avoid future-data leakage.

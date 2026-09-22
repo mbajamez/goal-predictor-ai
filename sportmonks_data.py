@@ -26,7 +26,13 @@ def _goals_from_scores(scores: Any, location: str):
         desc = str(s.get("description") or "").upper()
         sc = s.get("score") or {}
         goals = sc.get("goals") if isinstance(sc, dict) else None
-        loc = str(s.get("participant", {}).get("meta", {}).get("location") or s.get("location") or "").lower()
+        score_obj = s.get("score") or {}
+        loc = str(
+            (score_obj.get("participant") if isinstance(score_obj, dict) else None)
+            or s.get("participant", {}).get("meta", {}).get("location")
+            or s.get("location")
+            or ""
+        ).lower()
         if goals is None:
             continue
         preferred.append((desc, loc, goals))

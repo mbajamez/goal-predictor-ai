@@ -104,7 +104,9 @@ if len(history_before) < 30:
     st.warning(f"Only {len(history_before)} completed matches are available before this fixture. The model can run, but calibration may be unavailable and uncertainty will be higher.")
 
 if st.button("🎯 Predict automatically", type="primary", use_container_width=True):
-    engine = RollingGoalEngine().fit(hist)
+    # Leakage-safe fit: only matches completed before the prediction fixture/date.
+    model_history = history_before if len(history_before) >= 20 else hist
+    engine = RollingGoalEngine().fit(model_history)
     lh, la, matrix = engine.predict(clean_team_name(home), clean_team_name(away), pred_date)
     raw15 = over_prob(matrix, 2)
     p25 = over_prob(matrix, 3)

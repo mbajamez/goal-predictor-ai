@@ -64,14 +64,14 @@ with st.sidebar:
         st.stop()
     league_name = st.selectbox("Competition", list(FREE_LEAGUES.values()))
     league_id = next(k for k,v in FREE_LEAGUES.items() if v == league_name)
-    st.caption("Free-plan competitions: Danish Superliga and Scottish Premiership.")
+    st.caption("The free plan currently provides these competitions; availability is controlled by your Sportmonks subscription.")
 
 with st.spinner("Loading fixtures and recent history from Sportmonks…"):
     try:
         hist, upcoming, league_info = load_league(league_id)
     except Exception as e:
         st.error(f"Sportmonks data request failed: {e}")
-        st.info("If your token is correct, try Refresh Sportmonks data. If the message mentions a plan/coverage restriction, the selected competition or data add-on is not available on your account.")
+        st.info("The app will automatically retry the documented fixtures endpoint. If you still see an error, check the competition coverage in Sportmonks and refresh the data.")
         st.stop()
 
 if hist.empty:

@@ -98,16 +98,42 @@ def fetch_league_info(client: SportmonksClient, league_id: int) -> dict:
 
 
 def fetch_season_fixtures(client: SportmonksClient, season_id: int, include_xg: bool = True) -> list[dict]:
+    """Fetch a season using the documented all-fixtures endpoint + season filter.
+
+    Some Sportmonks accounts/versions return 404 for the convenience route
+    /fixtures/seasons/{id}. The canonical fixtures endpoint supports season
+    filtering, so use it as the primary route and retain the old route only as
+    a fallback for older API deployments.
+    """
     include = "participants;scores"
     if include_xg:
         include += ";xGFixture"
     rows = []
     page = 1
-    while page <= 30:
-        payload = client._get(
-            f"fixtures/seasons/{int(season_id)}",
-            {"include": include, "per_page": 50, "page": page, "order": "asc"},
-        )
+    last_error = None
+    while page <= 60:
+        try:
+            payload = client._get(
+                "fixtures",
+                {
+                    "include": include,
+                    "filters": f"fixtureSeasons:{int(season_id)}",
+                    "per_page": 50,
+                    "page": page,
+                    "order": "asc",
+                },
+            )
+        except RuntimeError as e:
+            last_error = e
+            # Backward-compatible fallback for accounts where season filtering
+            # is unavailable but the convenience route is supported.
+            if page == 1:
+                payload = client._get(
+                    f"fixtures/seasons/{int(season_id)}",
+                    {"include": include, "per_page": 50, "page": page, "order": "asc"},
+                )
+            else:
+                raise
         data = _extract_data(payload)
         rows.extend(data)
         meta = payload.get("pagination") or {}

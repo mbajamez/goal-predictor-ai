@@ -14,6 +14,7 @@ class SportmonksClient:
         self.base_url = "https://api.sportmonks.com/v3/football"
         self.timeout = timeout
         self.session = requests.Session()
+        self.session.headers.update({"Accept": "application/json", "User-Agent": "GoalPredictAI/1.0"})
 
     def _get(self, path, params=None, retries=3):
         params = dict(params or {})
@@ -21,13 +22,21 @@ class SportmonksClient:
         last = None
         for attempt in range(retries):
             try:
-                r = self.session.get(
-                    f"{self.base_url}/{path.lstrip('/')}",
-                    params=params, timeout=self.timeout
-                )
+                r = self.session.get(f"{self.base_url}/{path.lstrip('/')}", params=params, timeout=self.timeout)
                 if r.status_code == 429:
-                    time.sleep(min(int(r.headers.get("Retry-After", "2")), 10))
+                    retry_after = r.headers.get("Retry-After", "2")
+                    try: delay = min(int(retry_after), 15)
+                    except ValueError: delay = 2
+                    time.sleep(delay)
                     continue
+                if r.status_code in (401, 403):
+                    detail = ""
+                    try:
+                        body = r.json()
+                        detail = body.get("message") or body.get("error") or ""
+                    except Exception:
+                        pass
+                    raise RuntimeError(f"Sportmonks rejected the request ({r.status_code}). {detail}".strip())
                 r.raise_for_status()
                 return r.json()
             except requests.RequestException as e:
@@ -35,17 +44,3 @@ class SportmonksClient:
                 if attempt < retries - 1:
                     time.sleep(2 ** attempt)
         raise RuntimeError(f"Sportmonks request failed: {last}")
-
-    def fixture(self, fixture_id):
-        return self._get(f"fixtures/{int(fixture_id)}", {
-            "include": "participants;scores;lineups.player;lineups.xGLineup;statistics.type;xgfixture.type;sidelined.player;sidelined.type"
-        })
-
-    def livescores(self):
-        return self._get("livescores", {"include": "participants;scores"})
-
-    def team(self, team_id):
-        return self._get(f"teams/{int(team_id)}", {"include": "statistics;latest;sidelined"})
-
-    def player(self, player_id):
-        return self._get(f"players/{int(player_id)}", {"include": "sidelined"})

@@ -1,93 +1,143 @@
-import os
+import json
 import pandas as pd
 import streamlit as st
+from api_client import SportmonksClient
+from sportmonks_data import FREE_LEAGUES, fetch_recent_seasons, build_history, build_upcoming
 from engine import RollingGoalEngine
-from security import clean_team_name, validate_csv_upload, validate_match_frame
+from calibration import ProbabilityCalibrator, metrics
+from security import clean_team_name
 
-st.set_page_config(page_title="GoalPredict AI Pro", page_icon="⚽", layout="wide")
+st.set_page_config(page_title="GoalPredict AI Pro", page_icon="⚽", layout="centered")
 st.title("⚽ GoalPredict AI Pro")
-st.caption("Dixon–Coles + rolling form + optional xG + calibrated Over 1.5 probabilities.")
+st.caption("Sportmonks automatic data + Dixon–Coles + rolling form + optional xG + calibrated Over 1.5")
+
+@st.cache_resource
+def get_client():
+    return SportmonksClient(timeout=25)
+
+@st.cache_data(ttl=900, show_spinner=False)
+def load_league(league_id: int):
+    client = get_client()
+    raw, info = fetch_recent_seasons(client, league_id, max_seasons=2)
+    hist = build_history(raw, league_id)
+    upcoming = build_upcoming(raw, league_id)
+    return hist, upcoming, info
+
+def over_prob(mat, minimum):
+    return float(sum(mat[h,a] for h in range(mat.shape[0]) for a in range(mat.shape[1]) if h+a >= minimum))
+
+def exact_prob(mat, total):
+    return float(sum(mat[h,a] for h in range(mat.shape[0]) for a in range(mat.shape[1]) if h+a == total))
+
+def calibrate_from_walkforward(hist: pd.DataFrame):
+    # Out-of-sample calibration: every historical prediction only sees matches before its date.
+    if len(hist) < 80:
+        return None, None
+    start = max(40, int(len(hist) * 0.35))
+    raw_p, y = [], []
+    engine = RollingGoalEngine()
+    engine.fit(hist)
+    for i in range(start, len(hist)):
+        r = hist.iloc[i]
+        try:
+            _, _, m = engine.predict(r.HomeTeam, r.AwayTeam, r.Date)
+            p = over_prob(m, 2)
+            raw_p.append(p)
+            y.append(int(r.FTHG + r.FTAG >= 2))
+        except Exception:
+            continue
+    if len(y) < 25 or len(set(y)) < 2:
+        return None, None
+    cal = ProbabilityCalibrator().fit(raw_p, y)
+    return cal, metrics(cal.transform(raw_p), y)
 
 with st.sidebar:
-    st.header("Data")
-    uploaded = st.file_uploader("Upload historical matches CSV", type=["csv"])
-    st.caption("Expected columns include Date, HomeTeam, AwayTeam, FTHG and FTAG. Optional: HomeXG, AwayXG.")
-
-@st.cache_data
-def read_uploaded(raw):
-    return pd.read_csv(raw, parse_dates=["Date"])
-
-def load_data():
-    if uploaded is not None:
-        return validate_match_frame(read_uploaded(uploaded))
-    local = "data/matches.csv"
-    if os.path.exists(local):
-        return validate_match_frame(pd.read_csv(local, parse_dates=["Date"]))
-    return None
-
-try:
-    df = load_data()
-except Exception as e:
-    st.error(f"Historical data could not be loaded: {e}")
-    df = None
-
-if df is None:
-    st.info("The app is running. No historical dataset is bundled with this deployment yet.")
-    st.markdown("### What to do next")
-    st.markdown("1. Download licensed historical football results/xG data.\n2. Upload the CSV using **Historical matches CSV** in the sidebar.\n3. Select the teams and prediction date.\n4. The model will use only matches before the selected date.")
-    st.divider()
-    st.subheader("Sportmonks")
+    st.header("Sportmonks")
+    if st.button("Refresh Sportmonks data", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
     try:
-        token = os.getenv("SPORTMONKS_TOKEN") or st.secrets.get("SPORTMONKS_TOKEN")
-    except Exception:
-        token = os.getenv("SPORTMONKS_TOKEN")
-    if token:
-        st.success("Sportmonks secret is configured.")
-    else:
-        st.warning("Sportmonks secret is not configured yet. Add SPORTMONKS_TOKEN in Streamlit App Settings → Secrets.")
+        get_client()
+        st.success("Sportmonks secret is configured")
+    except Exception as e:
+        st.error(str(e))
+        st.stop()
+    league_name = st.selectbox("Competition", list(FREE_LEAGUES.values()))
+    league_id = next(k for k,v in FREE_LEAGUES.items() if v == league_name)
+    st.caption("Free-plan competitions: Danish Superliga and Scottish Premiership.")
+
+with st.spinner("Loading fixtures and recent history from Sportmonks…"):
+    try:
+        hist, upcoming, league_info = load_league(league_id)
+    except Exception as e:
+        st.error(f"Sportmonks data request failed: {e}")
+        st.info("If your token is correct, try Refresh Sportmonks data. If the message mentions a plan/coverage restriction, the selected competition or data add-on is not available on your account.")
+        st.stop()
+
+if hist.empty:
+    st.warning("Sportmonks returned no completed matches for this competition in the seasons available to this account.")
     st.stop()
 
-teams = sorted(set(df.HomeTeam) | set(df.AwayTeam))
-if len(teams) < 2:
-    st.error("The dataset must contain at least two teams.")
+st.success(f"Loaded {len(hist)} completed matches from Sportmonks.")
+
+# Prefer an actual upcoming fixture; otherwise allow a manual matchup.
+if not upcoming.empty:
+    upcoming["label"] = upcoming.apply(lambda r: f"{r.HomeTeam} vs {r.AwayTeam} — {pd.Timestamp(r.Date).strftime('%d %b %Y %H:%M')}", axis=1)
+    choice = st.selectbox("Upcoming fixture", upcoming["label"].tolist())
+    fx = upcoming.loc[upcoming.label == choice].iloc[0]
+    home, away, pred_date = fx.HomeTeam, fx.AwayTeam, pd.Timestamp(fx.Date)
+else:
+    teams = sorted(set(hist.HomeTeam) | set(hist.AwayTeam))
+    c1,c2 = st.columns(2)
+    home = c1.selectbox("Home team", teams)
+    away = c2.selectbox("Away team", teams, index=1 if len(teams)>1 else 0)
+    pred_date = pd.Timestamp(st.date_input("Prediction date", value=pd.Timestamp.utcnow().date()))
+
+st.write(f"**Selected:** {home} vs {away}")
+
+if home == away:
+    st.error("Choose two different teams.")
     st.stop()
 
-c1, c2 = st.columns(2)
-with c1:
-    home = st.selectbox("Home team", teams)
-with c2:
-    away = st.selectbox("Away team", teams, index=1 if len(teams) > 1 else 0)
+history_before = hist[hist.Date < pred_date].copy()
+if len(history_before) < 30:
+    st.warning(f"Only {len(history_before)} completed matches are available before this fixture. The model can run, but calibration may be unavailable and uncertainty will be higher.")
 
-date = st.date_input("Prediction date", value=df.Date.max().date())
+if st.button("🎯 Predict automatically", type="primary", use_container_width=True):
+    engine = RollingGoalEngine().fit(hist)
+    lh, la, matrix = engine.predict(clean_team_name(home), clean_team_name(away), pred_date)
+    raw15 = over_prob(matrix, 2)
+    p25 = over_prob(matrix, 3)
+    p2 = exact_prob(matrix, 2)
+    cal, cal_metrics = calibrate_from_walkforward(history_before)
+    p15 = float(cal.transform([raw15])[0]) if cal else raw15
 
-if st.button("Predict", type="primary", use_container_width=True):
-    home = clean_team_name(home); away = clean_team_name(away)
-    if home == away:
-        st.error("Choose different teams.")
+    st.subheader("Prediction")
+    c1,c2,c3 = st.columns(3)
+    c1.metric("Over 1.5 goals", f"{p15:.1%}")
+    c2.metric("Over 2.5 goals", f"{p25:.1%}")
+    c3.metric("Exactly 2 goals", f"{p2:.1%}")
+    c1,c2 = st.columns(2)
+    c1.metric(f"{home} expected goals", f"{lh:.2f}")
+    c2.metric(f"{away} expected goals", f"{la:.2f}")
+
+    rows=[]
+    for h in range(matrix.shape[0]):
+        for a in range(matrix.shape[1]):
+            rows.append((f"{h}-{a}", matrix[h,a]))
+    score=pd.DataFrame(rows,columns=["Score","Probability"]).sort_values("Probability",ascending=False).head(10)
+    score["Probability"]=score["Probability"].map(lambda x:f"{x:.1%}")
+    st.subheader("Most likely scorelines")
+    st.dataframe(score, hide_index=True, use_container_width=True)
+
+    if cal_metrics:
+        st.caption(f"Calibration evaluated with walk-forward historical predictions: Brier {cal_metrics['brier']:.3f}, log loss {cal_metrics['log_loss']:.3f}.")
     else:
-        hist = df[df.Date < pd.Timestamp(date)]
-        if len(hist) < 100:
-            st.warning(f"Only {len(hist)} historical matches are available before this date. Use at least 100 for the current model.")
-        else:
-            eng = RollingGoalEngine(); eng.fit(hist)
-            lh, la, m = eng.predict(home, away, pd.Timestamp(date))
-            p15 = float(sum(m[h,a] for h in range(m.shape[0]) for a in range(m.shape[1]) if h+a >= 2))
-            p25 = float(sum(m[h,a] for h in range(m.shape[0]) for a in range(m.shape[1]) if h+a >= 3))
-            p2 = float(sum(m[h,a] for h in range(m.shape[0]) for a in range(m.shape[1]) if h+a == 2))
-            c1,c2,c3=st.columns(3)
-            c1.metric("Over 1.5",f"{p15:.1%}"); c2.metric("Over 2.5",f"{p25:.1%}"); c3.metric("Exactly 2",f"{p2:.1%}")
-            c1,c2=st.columns(2)
-            c1.metric(f"{home} expected goals",f"{lh:.2f}"); c2.metric(f"{away} expected goals",f"{la:.2f}")
-            rows=[(f"{h}-{a}",m[h,a]) for h in range(m.shape[0]) for a in range(m.shape[1])]
-            score=pd.DataFrame(rows,columns=["Score","Probability"]).sort_values("Probability",ascending=False).head(10)
-            score["Probability"]=score["Probability"].map(lambda x:f"{x:.1%}")
-            st.dataframe(score,hide_index=True,use_container_width=True)
+        st.caption("Calibration needs more completed historical matches; the displayed Over 1.5 value is the raw model probability.")
 
 st.divider()
-st.subheader("Walk-forward validation")
-try:
-    import json
-    with open("models/metrics.json") as f: met=json.load(f)
-    st.json(met)
-except FileNotFoundError:
-    st.info("Validation metrics will appear after the historical-data training/evaluation pipeline has been run.")
+st.subheader("Data status")
+st.write(f"Completed matches: **{len(hist)}**")
+st.write(f"Upcoming fixtures found: **{len(upcoming)}**")
+st.write(f"Latest completed match: **{pd.Timestamp(hist.Date.max()).strftime('%d %b %Y')}**")
+st.caption("This model is a statistical estimate, not a guarantee of match outcome. Sportmonks coverage and add-ons determine which fields are available to your account.")
